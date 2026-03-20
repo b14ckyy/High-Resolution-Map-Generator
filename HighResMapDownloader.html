@@ -99,7 +99,6 @@
          * Temporary viewport debug overlay kept for future mobile browser troubleshooting.
          * Re-enable together with the matching HTML block and JS update block below.
          */
-        /* #viewport-debug { position: absolute; top: 112px; right: 10px; z-index: 1007; background: rgba(0, 0, 0, 0.78); color: #87b025; border: 1px solid #87b025; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 10px; line-height: 1.35; padding: 6px 8px; white-space: pre-line; pointer-events: none; min-width: 145px; } */
         .leaflet-control-geocoder { background: #333 !important; border: 2px solid #87b025 !important; border-radius: 4px !important; transition: border-color 0.3s; z-index: 2000 !important; }
         .leaflet-control-geocoder-icon { filter: invert(1); width: 30px !important; height: 30px !important; }
         
@@ -149,7 +148,8 @@
 
     <div id="controls" class="hidden">
         <div class="header-main"><span class="text-white">HIGH-RES</span> <span class="text-green">MAP GENERATOR</span></div>
-        <button id="linkSDBtn" onclick="linkSDCard()">📂 Link SD Card</button>
+        <button id="linkSDBtn" onclick="linkSDCard()" aria-label="Link SD Card">📂 Link SD Card</button>
+        <div id="fsApiWarning" style="display:none; color:#ffb300; font-size:12px; margin-top:4px; background:rgba(30,30,30,0.7); border-radius:3px; padding:4px 6px;"></div>
         
         <div class="toggle-container">
             <span class="label" style="margin:0;">💾 Remember Settings</span>
@@ -177,7 +177,7 @@
         <div id="googleWarning" class="google-warning">⚠️ Warning: Google might temporarily ban IPs aftre bulk downloads for 24 hours.</div>
         <div id="yaapuWarning" class="yaapu-warning"></div>
         <hr style="width: 100%; border-color: #333; margin: 5px 0;">
-        <div><div class="label">Project Folder Name</div><input type="text" id="projectName" value="MyLocalField" oninput="saveSettings()"></div>
+        <div><div class="label">Project Folder Name</div><input type="text" id="projectName" value="MyLocalField" maxlength="32" aria-label="Project Folder Name" oninput="if(this.value.length>32)this.value=this.value.slice(0,32);saveSettings();const status=document.getElementById('status');if(status&&status.innerText.startsWith('Error: Please enter a Project Folder Name.'))status.innerText='';"></div>
         
         <div class="zoom-row">
             <div>
@@ -192,10 +192,11 @@
 
         <div class="toggle-container"><span class="label" style="margin:0;">🔒 Zoom Lock</span><label class="switch"><input type="checkbox" id="zoomLockToggle" onchange="toggleZoomLock()"><span class="slider"></span></label></div>
         <div id="syncDock">
-            <button id="syncBtn" onclick="startSync()">⚡ Sync to SD Card</button>
-            <div id="status">Search or zoom to your field...</div>
+            <button id="syncBtn" onclick="startSync()" aria-label="Sync to SD Card">⚡ Sync to SD Card</button>
+            <div id="status" role="status" aria-live="polite">Search or zoom to your field...</div>
+            <div id="logArea" style="font-size:11px; color:#ffb300; margin-top:6px; min-height:18px; max-height:80px; overflow-y:auto; background:rgba(30,30,30,0.7); border-radius:3px; padding:4px 6px; display:none;"></div>
         </div>
-        <button id="restoreBtn" onclick="restoreSettings()" style="padding: 6px 10px; font-size: 12px; background: #ff4444; color: white;">🔄 Restore Settings</button>
+        <button id="restoreBtn" onclick="restoreSettings()" style="padding: 6px 10px; font-size: 12px; background: #ff4444; color: white;" aria-label="Restore Settings">🔄 Restore Settings</button>
     </div>
 
     <div id="map" oncontextmenu="return false;">
@@ -206,8 +207,6 @@
         <div id="zoom-display-map">Zoom: 12</div>
         <div id="measure-btn-map" onclick="toggleMeasure()">📏 Measure</div>
         <div id="fullscreen-btn-map" onclick="toggleFullscreen()">⛶ Fullscreen</div>
-        <!-- Temporary viewport debug overlay kept for future mobile browser troubleshooting. -->
-        <!-- <div id="viewport-debug">vv: waiting…</div> -->
     </div>
 
     <div id="syncOverlay">
@@ -230,6 +229,22 @@
     <canvas id="resizeCanvas" width="100" height="100" style="display:none;"></canvas>
 
     <script>
+    // Feature detection for File System Access API
+    function checkFSAccessSupport() {
+        const btn = document.getElementById('linkSDBtn');
+        const warn = document.getElementById('fsApiWarning');
+        if (!window.showDirectoryPicker) {
+            if (btn) btn.disabled = true;
+            if (warn) {
+                warn.style.display = 'block';
+                warn.innerText = 'Your browser does not support SD card access. Use ZIP download instead.';
+            }
+        } else {
+            if (btn) btn.disabled = false;
+            if (warn) warn.style.display = 'none';
+        }
+    }
+    window.addEventListener('DOMContentLoaded', checkFSAccessSupport);
         /*
          * MapDownloader is a self-contained offline map export tool.
          * The code below is organized into five main areas:
@@ -242,14 +257,26 @@
 
         /* Persist the user's working configuration between sessions when enabled. */
         function saveSettings() {
-            if (!document.getElementById('saveSettingsToggle').checked) return;
+            const saveToggle = document.getElementById('saveSettingsToggle');
+            if (!saveToggle) { appendLog('saveSettings: saveSettingsToggle not found', true); return; }
+            if (!saveToggle.checked) return;
+            const targetWidget = document.getElementById('targetWidget');
+            const provider = document.getElementById('provider');
+            const mapTypeChoice = document.getElementById('mapTypeChoice');
+            const projectName = document.getElementById('projectName');
+            const minZoom = document.getElementById('minZoom');
+            const maxZoom = document.getElementById('maxZoom');
+            if (!targetWidget || !provider || !mapTypeChoice || !projectName || !minZoom || !maxZoom) {
+                appendLog('saveSettings: One or more required elements not found', true);
+                return;
+            }
             const settings = {
-                targetWidget: document.getElementById('targetWidget').value,
-                provider: document.getElementById('provider').value,
-                mapType: document.getElementById('mapTypeChoice').value,
-                projectName: document.getElementById('projectName').value,
-                minZoom: document.getElementById('minZoom').value,
-                maxZoom: document.getElementById('maxZoom').value,
+                targetWidget: targetWidget.value,
+                provider: provider.value,
+                mapType: mapTypeChoice.value,
+                projectName: projectName.value,
+                minZoom: minZoom.value,
+                maxZoom: maxZoom.value,
                 mapCenter: map.getCenter(),
                 mapZoom: map.getZoom(),
                 rememberOn: true
@@ -262,26 +289,37 @@
             const saved = localStorage.getItem('mapGenSettings');
             if (!saved) return;
             const s = JSON.parse(saved);
-            
-            document.getElementById('saveSettingsToggle').checked = s.rememberOn || false;
+            const saveToggle = document.getElementById('saveSettingsToggle');
+            if (!saveToggle) { appendLog('loadSettings: saveSettingsToggle not found', true); return; }
+            saveToggle.checked = s.rememberOn || false;
             if (!s.rememberOn) return;
 
-            if(s.targetWidget) document.getElementById('targetWidget').value = s.targetWidget;
-            if(s.provider) document.getElementById('provider').value = s.provider;
-            
+            const targetWidget = document.getElementById('targetWidget');
+            const provider = document.getElementById('provider');
+            const mapTypeChoice = document.getElementById('mapTypeChoice');
+            const projectName = document.getElementById('projectName');
+            const minZoom = document.getElementById('minZoom');
+            const maxZoom = document.getElementById('maxZoom');
+            if (!targetWidget || !provider || !mapTypeChoice || !projectName || !minZoom || !maxZoom) {
+                appendLog('loadSettings: One or more required elements not found', true);
+                return;
+            }
+            if(s.targetWidget) targetWidget.value = s.targetWidget;
+            if(s.provider) provider.value = s.provider;
             syncMapOptions();
-            if(s.mapType) document.getElementById('mapTypeChoice').value = s.mapType;
-            if(s.projectName) document.getElementById('projectName').value = s.projectName;
-            if(s.minZoom) document.getElementById('minZoom').value = s.minZoom;
-            if(s.maxZoom) document.getElementById('maxZoom').value = s.maxZoom;
-            
+            if(s.mapType) mapTypeChoice.value = s.mapType;
+            if(s.projectName) projectName.value = s.projectName;
+            if(s.minZoom) minZoom.value = s.minZoom;
+            if(s.maxZoom) maxZoom.value = s.maxZoom;
             if(s.mapCenter) map.setView([s.mapCenter.lat, s.mapCenter.lng], s.mapZoom || 12);
             switchMapLayer();
         }
 
         /* Enable or disable persistent settings storage from the UI toggle. */
         function toggleSaveSettings() {
-            if (!document.getElementById('saveSettingsToggle').checked) {
+            const saveToggle = document.getElementById('saveSettingsToggle');
+            if (!saveToggle) { appendLog('toggleSaveSettings: saveSettingsToggle not found', true); return; }
+            if (!saveToggle.checked) {
                 localStorage.removeItem('mapGenSettings');
             } else {
                 saveSettings();
@@ -291,14 +329,25 @@
         /* Restore settings to defaults immediately. */
         function restoreSettings() {
             localStorage.removeItem('mapGenSettings');
-            document.getElementById('saveSettingsToggle').checked = false;
-            document.getElementById('targetWidget').value = 'b14ckyy';
-            document.getElementById('provider').value = 'OSM';
+            const saveToggle = document.getElementById('saveSettingsToggle');
+            const targetWidget = document.getElementById('targetWidget');
+            const provider = document.getElementById('provider');
+            const mapTypeChoice = document.getElementById('mapTypeChoice');
+            const projectName = document.getElementById('projectName');
+            const minZoom = document.getElementById('minZoom');
+            const maxZoom = document.getElementById('maxZoom');
+            if (!saveToggle || !targetWidget || !provider || !mapTypeChoice || !projectName || !minZoom || !maxZoom) {
+                appendLog('restoreSettings: One or more required elements not found', true);
+                return;
+            }
+            saveToggle.checked = false;
+            targetWidget.value = 'b14ckyy';
+            provider.value = 'OSM';
             syncMapOptions();
-            document.getElementById('mapTypeChoice').value = 'Street';
-            document.getElementById('projectName').value = 'MyLocalField';
-            document.getElementById('minZoom').value = '8';
-            document.getElementById('maxZoom').value = '14';
+            mapTypeChoice.value = 'Street';
+            projectName.value = 'MyLocalField';
+            minZoom.value = '8';
+            maxZoom.value = '14';
             map.setView([42.6977, 23.3219], 12);
             switchMapLayer();
         }
@@ -556,7 +605,18 @@
 
         /* SD card linking uses the File System Access API when the browser supports it. */
         let sdHandle = null;
-        async function linkSDCard() { try { sdHandle = await window.showDirectoryPicker({ mode: 'readwrite' }); const btn = document.getElementById('linkSDBtn'); btn.innerText = "✅ SD Card Linked"; btn.classList.add('linked'); } catch (err) {} }
+        async function linkSDCard() {
+            if (!window.showDirectoryPicker) {
+                alert('Your browser does not support SD card access. Use ZIP download instead.');
+                return;
+            }
+            try {
+                sdHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                const btn = document.getElementById('linkSDBtn');
+                btn.innerText = "✅ SD Card Linked";
+                btn.classList.add('linked');
+            } catch (err) {}
+        }
 
         /* Reset the SD card UI if permission is lost or the directory becomes inaccessible. */
         function resetSDButton() { sdHandle = null; const btn = document.getElementById('linkSDBtn'); btn.innerText = "📂 Link SD Card"; btn.classList.remove('linked'); }
@@ -682,12 +742,26 @@
             const midT = L.latLng((latlngs[0].lat + latlngs[1].lat)/2, (latlngs[0].lng + latlngs[1].lng)/2), midL = L.latLng((latlngs[1].lat + latlngs[2].lat)/2, (latlngs[1].lng + latlngs[2].lng)/2);
             if (!labels.width) { labels.width = L.marker(midT, { icon: L.divIcon({ className: 'side-label', html: wS }) }).addTo(map); labels.height = L.marker(midL, { icon: L.divIcon({ className: 'side-label', html: hS }) }).addTo(map); }
             else { labels.width.setLatLng(midT).setIcon(L.divIcon({ className: 'side-label', html: wS })); labels.height.setLatLng(midL).setIcon(L.divIcon({ className: 'side-label', html: hS })); }
-            document.getElementById('status').innerHTML = `Area: ${formatArea(area)}<br><span style="color:#87b025">Total Sync Tiles (100x100 PNG): ${tiles.toLocaleString()}</span>`;
+            const status = document.getElementById('status');
+            if (status) {
+                status.innerHTML = `<span style=\"color:#ffeb3b\">Area: ${formatArea(area)}</span><br><span style=\"color:#87b025\">Total Sync Tiles (100x100 PNG): ${tiles.toLocaleString()}</span>`;
+                status.style.color = '#ffeb3b';
+            }
         }
 
         /* Refresh derived map UI whenever the area or zoom range changes. */
         function triggerUpdate() { if(drawnItems.getLayers().length > 0) updateSideLabels(drawnItems.getLayers()[0]); document.getElementById('zoom-display-map').innerText = `Zoom: ${map.getZoom()}`; }
-        map.on(L.Draw.Event.CREATED, e => { drawnItems.clearLayers(); drawnItems.addLayer(e.layer); updateSideLabels(e.layer); });
+        map.on(L.Draw.Event.CREATED, e => {
+            // Remove error message when rectangle is drawn
+            const status = document.getElementById('status');
+            if (status && status.innerText.startsWith('Error:')) {
+                status.innerText = '';
+                status.style.color = '#ffeb3b';
+            }
+            drawnItems.clearLayers();
+            drawnItems.addLayer(e.layer);
+            updateSideLabels(e.layer);
+        });
         map.on('draw:editmove draw:editresize editdrag zoomend moveend', triggerUpdate);
         
         /* Update the Leaflet Draw tooltip to use the user's selected metric system while drawing. */
@@ -809,6 +883,24 @@
         const MAX_FILE_WRITE_RETRIES = 2;
         const MIN_TILE_BLOB_BYTES = 128;
         const PROGRESS_UPDATE_INTERVAL_MS = 120;
+        const LOG_MAX_LINES = 30;
+
+        // Log utility for sync/export errors and retries
+        function appendLog(msg, isWarning = false) {
+            const logArea = document.getElementById('logArea');
+            if (!logArea) return;
+            logArea.style.display = 'block';
+            let lines = logArea.innerHTML.split('<br>').filter(Boolean);
+            if (lines.length > LOG_MAX_LINES) lines = lines.slice(lines.length - LOG_MAX_LINES);
+            const safeMsg = msg.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            lines.push(isWarning ? `<span style='color:#ff5252'>${safeMsg}</span>` : safeMsg);
+            logArea.innerHTML = lines.join('<br>');
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+        function clearLog() {
+            const logArea = document.getElementById('logArea');
+            if (logArea) { logArea.innerHTML = ''; logArea.style.display = 'none'; }
+        }
 
         /* Small async delay helper used for retry backoff. */
         function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -881,16 +973,27 @@
 
                     const savedFile = await fileH.getFile();
                     if (savedFile && savedFile.size === blob.size && savedFile.size > 0) {
+                        if (attempt > 0) appendLog(`Write succeeded after retry #${attempt} for ${fileName}`);
                         return;
                     }
                     throw new Error(`File size verification failed (${savedFile ? savedFile.size : 0} != ${blob.size})`);
                 } catch (err) {
+                    // Detect SD card ejection or permission loss
+                    if (err && (err.name === 'NotFoundError' || err.name === 'NotAllowedError' || /permission|access|eject|unavailable|denied/i.test(err.message))) {
+                        appendLog('Critical: SD card removed or permission lost. Sync aborted.', true);
+                        document.getElementById('status').innerText = 'Sync aborted: SD card removed or permission lost.';
+                        syncAborted = true;
+                        closeSync();
+                        throw new Error('Sync aborted due to SD card removal or permission loss');
+                    }
                     lastError = err;
+                    appendLog(`Write error (attempt ${attempt+1}) for ${fileName}: ${err.message}`);
                     if (attempt < MAX_FILE_WRITE_RETRIES) {
                         await sleep(120 * (attempt + 1));
                     }
                 }
             }
+            appendLog(`Write failed for ${fileName} after ${MAX_FILE_WRITE_RETRIES+1} attempts`, true);
             throw lastError || new Error('Verified file write failed');
         }
 
@@ -951,7 +1054,36 @@
 
         /* Show the export confirmation dialog with a summary of the current selection. */
         function startSync() {
-            const layer = drawnItems.getLayers()[0]; if (!layer) { alert("Select area first."); return; }
+            const layer = drawnItems.getLayers()[0];
+            const status = document.getElementById('status');
+            const projectNameInput = document.getElementById('projectName');
+            // If no project folder name, show error and focus input
+            if (!projectNameInput.value.trim()) {
+                if (status) {
+                    status.textContent = 'Error: Please enter a Project Folder Name.';
+                    status.style.color = '#ff5252';
+                }
+                if (projectNameInput) projectNameInput.focus();
+                return;
+            }
+            // If no rectangle, show error and auto-engage drawing tool
+            if (!layer) {
+                if (status) {
+                    status.textContent = 'Error: Please draw a rectangle to select an area for sync.';
+                    status.style.color = '#ff5252';
+                }
+                // Auto-engage rectangle drawing tool
+                if (typeof drawControl !== 'undefined' && drawControl._toolbars && drawControl._toolbars.draw && drawControl._toolbars.draw._modes && drawControl._toolbars.draw._modes.rectangle && drawControl._toolbars.draw._modes.rectangle.handler) {
+                    drawControl._toolbars.draw._modes.rectangle.handler.enable();
+                }
+                return;
+            }
+            // Restore color for normal status
+            if (status && status.style.color === 'rgb(255, 82, 82)') status.style.color = '';
+            // Remove error message if present
+            if (status && status.innerText.startsWith('Error:')) {
+                status.innerText = '';
+            }
             syncAborted = false;
             document.getElementById('modalHeader').innerText = "Syncing to SD Card";
             document.getElementById('overwriteSection').style.display = 'flex';
@@ -1040,17 +1172,29 @@
                 }
             }
 
-            let total = tiles.length, processed = 0, failedCount = 0;
+            let total = tiles.length, processed = 0, failedCount = 0, errorCount = 0;
             const startTime = Date.now();
             let lastProgressUpdate = 0;
 
-            const pushProgress = (force = false) => {
+
+            // Use requestAnimationFrame for smooth progress updates
+            let rafPending = false;
+            function pushProgress(force = false) {
                 const now = Date.now();
-                if (force || (now - lastProgressUpdate) >= PROGRESS_UPDATE_INTERVAL_MS) {
+                if (force) {
                     updateSyncProgress(processed, total, startTime, failedCount);
                     lastProgressUpdate = now;
+                    return;
                 }
-            };
+                if (!rafPending && (now - lastProgressUpdate) >= 100) {
+                    rafPending = true;
+                    window.requestAnimationFrame(() => {
+                        updateSyncProgress(processed, total, startTime, failedCount);
+                        lastProgressUpdate = Date.now();
+                        rafPending = false;
+                    });
+                }
+            }
 
             pushProgress(true);
 
@@ -1086,6 +1230,11 @@
                         }
                     } catch (e) {
                         failedCount++;
+                        errorCount++;
+                        appendLog(`Tile failed: z${z} x${x} y${y} (${e.message})`, true);
+                        if (errorCount === 10) {
+                            appendLog('⚠️ Too many errors. Consider using ZIP download mode for better reliability.', true);
+                        }
                     } finally {
                         processed++;
                         pushProgress();
@@ -1094,6 +1243,7 @@
             });
 
             await Promise.all(workers);
+            if (!syncAborted && failedCount === 0) clearLog();
             if (syncAborted) return;
 
             pushProgress(true);
