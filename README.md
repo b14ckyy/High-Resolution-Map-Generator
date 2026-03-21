@@ -70,8 +70,9 @@ This is a web-based tool for generating and exporting 100x100 PNG map tiles from
 
 8. **Select Area of Interest**
 	- Draw a rectangle on the map to define the area for tile download.
+	- Right-mouse click deletes the rectangle drawn. Second right-mouse click disengages the drawing tool.
 
-	<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/0af14ebb-1b6a-4bf3-9081-d51cbaf11c08" />
+	<img width="1364" height="768" alt="image" src="https://github.com/user-attachments/assets/7e9fd1f6-2f49-4fc1-85fc-4c82db1c14c4" />
 
 
 
