@@ -174,7 +174,7 @@
             </select>
         </div>
         <div><div class="label">Map Type</div><select id="mapTypeChoice" onchange="switchMapLayer(); saveSettings();"></select></div>
-        <div id="googleWarning" class="google-warning">⚠️ Warning: Google might temporarily ban IPs aftre bulk downloads for 24 hours.</div>
+        <div id="googleWarning" class="google-warning">⚠️ Warning: Google might temporarily ban IPs after bulk downloads for 24 hours.</div>
         <div id="yaapuWarning" class="yaapu-warning"></div>
         <hr style="width: 100%; border-color: #333; margin: 5px 0;">
         <div><div class="label">Project Folder Name</div><input type="text" id="projectName" value="MyLocalField" maxlength="32" aria-label="Project Folder Name" oninput="if(this.value.length>32)this.value=this.value.slice(0,32);saveSettings();const status=document.getElementById('status');if(status&&status.innerText.startsWith('Error: Please enter a Project Folder Name.'))status.innerText='';"></div>
