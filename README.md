@@ -48,7 +48,7 @@ This is a web-based tool for generating and exporting 100x100 PNG map tiles from
 
 ## How to Use
 
-You can use the tool online without downloading by visiting: [https://martinovem.github.io/High-Resolution-Map-Generator/](https://martinovem.github.io/High-Resolution-Map-Generator/)
+⚠️ **You can use the tool online without downloading** by visiting: [https://martinovem.github.io/High-Resolution-Map-Generator/](https://martinovem.github.io/High-Resolution-Map-Generator/)
 
 1. **Download the Tool**
 	- Go to the [GitHub repository](https://github.com/MartinovEm/High-Resolution-Map-Generator).
