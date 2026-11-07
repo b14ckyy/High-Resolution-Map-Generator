@@ -8,6 +8,121 @@
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script>
+    /*
+     * Desktop app bridge (https://github.com/b14ckyy/hires-map-generator-app). Inside the app, tile syncs
+     * run in its native backend, SD card access and saving use native dialogs, and folders work on every
+     * platform. In a normal browser `hrmgApp` is null and nothing here changes the page.
+     */
+    const hrmgApp = (() => {
+        const tauri = window.__TAURI__;
+        if (!tauri || !tauri.core || typeof tauri.core.invoke !== 'function') return null;
+        const invoke = tauri.core.invoke;
+        const API_VERSION = 1;
+        /* Resolves to false for an app whose backend speaks another API version; the page then falls back to the browser code. */
+        const supported = invoke('hrmg_info').then(info => info && info.api === API_VERSION).catch(() => false);
+
+        const join = (dir, name) => dir.replace(/[\\/]+$/, '') + '/' + name;
+        const stat = path => invoke('fs_stat', { path });
+        const notFound = name => new DOMException(`${name} not found`, 'NotFoundError');
+        const typeMismatch = name => new DOMException(`${name} has the wrong type`, 'TypeMismatchError');
+        async function writeFile(path, blob) {
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            await invoke('fs_write', bytes, { headers: { 'x-hrmg-path': encodeURIComponent(path) } });
+        }
+
+        /* The parts of the File System Access API this page uses, backed by a folder picked in a native dialog. */
+        class NativeFileHandle {
+            constructor(path, name) { this.kind = 'file'; this.name = name; this.nativePath = path; }
+            async createWritable() {
+                const chunks = [], path = this.nativePath;
+                return {
+                    async write(data) { chunks.push(data instanceof Blob ? data : new Blob([data])); },
+                    async close() { await writeFile(path, new Blob(chunks)); },
+                    async abort() { chunks.length = 0; }
+                };
+            }
+            async getFile() {
+                const s = await stat(this.nativePath);
+                if (!s.exists) throw notFound(this.name);
+                return { name: this.name, size: s.size };
+            }
+        }
+        class NativeDirHandle {
+            constructor(path, name) { this.kind = 'directory'; this.name = name; this.nativePath = path; }
+            async queryPermission() { return (await stat(this.nativePath)).exists ? 'granted' : 'denied'; }
+            async requestPermission() { return this.queryPermission(); }
+            values() {
+                const path = this.nativePath, name = this.name;
+                return {
+                    async next() {
+                        const s = await stat(path);
+                        if (!s.exists || !s.isDir) throw notFound(name);
+                        return { done: true, value: undefined };
+                    },
+                    [Symbol.asyncIterator]() { return this; }
+                };
+            }
+            async getDirectoryHandle(name, opts = {}) {
+                const path = join(this.nativePath, name), s = await stat(path);
+                if (!s.exists) {
+                    if (!opts.create) throw notFound(name);
+                    await invoke('fs_mkdir', { path });
+                } else if (!s.isDir) throw typeMismatch(name);
+                return new NativeDirHandle(path, name);
+            }
+            async getFileHandle(name, opts = {}) {
+                const path = join(this.nativePath, name), s = await stat(path);
+                if (s.exists && s.isDir) throw typeMismatch(name);
+                if (!s.exists && !opts.create) throw notFound(name);
+                return new NativeFileHandle(path, name);
+            }
+            async removeEntry(name) {
+                const path = join(this.nativePath, name);
+                if (!(await stat(path)).exists) throw notFound(name);
+                await invoke('fs_remove', { path });
+            }
+        }
+
+        const browserPicker = window.showDirectoryPicker ? window.showDirectoryPicker.bind(window) : null;
+        window.showDirectoryPicker = async (options) => {
+            if (!(await supported)) {
+                if (browserPicker) return browserPicker(options);
+                throw new DOMException('Folder access is not available', 'NotSupportedError');
+            }
+            const path = await invoke('pick_folder');
+            if (!path) throw new DOMException('The user aborted a request.', 'AbortError');
+            return new NativeDirHandle(path, path.split(/[\\/]/).filter(Boolean).pop() || path);
+        };
+
+        const browserSaveAs = window.saveAs;
+        window.saveAs = async (blob, name) => {
+            if (!(await supported)) return browserSaveAs(blob, name);
+            try {
+                const path = await invoke('pick_save_file', { defaultName: name });
+                if (path) await writeFile(path, blob);
+            } catch (e) {
+                alert(`Saving ${name} failed: ${e}`);
+            }
+        };
+
+        let runningJob = null;
+        return {
+            supported,
+            pickSavePath: defaultName => invoke('pick_save_file', { defaultName }),
+            /* Run a tile job in the backend. Resolves with { total, failed, skipped, cancelled, error }. */
+            async runTileJob(job, onEvent) {
+                const jobId = `tiles-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                const channel = new tauri.core.Channel();
+                channel.onmessage = onEvent;
+                runningJob = jobId;
+                try { return await invoke('tiles_start', { jobId, job, onEvent: channel }); }
+                finally { runningJob = null; }
+            },
+            cancelTileJob() { if (runningJob) invoke('tiles_cancel', { jobId: runningJob }); }
+        };
+    })();
+    </script>
 
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -1352,6 +1467,15 @@
             return `https://mt1.google.com/vt/lyrs=m&x=${x}&y=${y}&z=${z}`;
         }
 
+        /* Source URLs of one output tile: the base layer first, then overlays drawn on top (ESRI Hybrid labels). */
+        function getTileSourceUrls(provider, mapType, z, x, y) {
+            const urls = [getTileUrl(provider, mapType, z, x, y)];
+            if (provider === 'ESRI' && mapType === 'Hybrid') {
+                urls.push(`https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/${z}/${y}/${x}`);
+            }
+            return urls;
+        }
+
         /* Build the output folder structure for the selected target widget format. */
         function getTilePath(target, isZipMode, provider, mapType, z, x, y, exportCfg) {
             if (target === 'export') return getExportTilePath(exportCfg, z, x, y);
@@ -1441,14 +1565,14 @@
         /* Download a single tile and scale it to the output profile size, adding label overlay imagery where required. */
         async function fetchResizedTileBlob(provider, mapType, z, x, y, canvas, ctx, profile) {
             const size = profile.size;
-            const img = await loadImage(getTileUrl(provider, mapType, z, x, y));
+            const [baseUrl, ...overlayUrls] = getTileSourceUrls(provider, mapType, z, x, y);
+            const img = await loadImage(baseUrl);
             ctx.clearRect(0, 0, size, size);
             ctx.drawImage(img, 0, 0, img.naturalWidth, img.naturalHeight, 0, 0, size, size);
-            if (provider === 'ESRI' && mapType === 'Hybrid') {
-                const labelUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/${z}/${y}/${x}`;
+            for (const overlayUrl of overlayUrls) {
                 try {
-                    const labelImg = await loadImage(labelUrl);
-                    ctx.drawImage(labelImg, 0, 0, 256, 256, 0, 0, size, size);
+                    const overlayImg = await loadImage(overlayUrl);
+                    ctx.drawImage(overlayImg, 0, 0, 256, 256, 0, 0, size, size);
                 } catch (e) {}
             }
             const blob = await canvasToBlob(canvas, profile);
@@ -1497,7 +1621,7 @@
         }
 
         /* Allow the running export job to stop cleanly between tile operations. */
-        function abortSync() { syncAborted = true; closeSync(); }
+        function abortSync() { syncAborted = true; if (hrmgApp) hrmgApp.cancelTileJob(); closeSync(); }
 
         /* Target name and example output path shown in the confirmation and completion dialogs. */
         function getTargetDisplayName(target) {
@@ -1651,11 +1775,104 @@
             confirmSync();
         }
 
+        /* All tiles of the selected area for every zoom level in the range. */
+        function collectSyncTiles(bounds, minZ, maxZ) {
+            const tiles = [];
+            for (let z = minZ; z <= maxZ; z++) {
+                const xMin = lon2tile(bounds.getWest(), z), xMax = lon2tile(bounds.getEast(), z), yMin = lat2tile(bounds.getNorth(), z), yMax = lat2tile(bounds.getSouth(), z);
+                for (let x = xMin; x <= xMax; x++) {
+                    for (let y = yMin; y <= yMax; y++) {
+                        tiles.push({ z, x, y });
+                    }
+                }
+            }
+            return tiles;
+        }
+
+        /* ZIP file name: project name plus the real target. */
+        function getSyncZipName(target, profile) {
+            const projName = document.getElementById('projectName').value.trim();
+            let targetLabel = 'b14ckyy';
+            if (target === 'yaapu') {
+                const yst = document.getElementById('yaapuSubTarget');
+                targetLabel = (yst && yst.value === 'HorusMappingWidget') ? 'Yaapu-EdgeTX' : 'Yaapu-ETHOS';
+            } else if (target === 'export') {
+                targetLabel = `Custom-${profile.size}`;
+            }
+            const safeName = projName.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'MapTiles';
+            return `${safeName}_${targetLabel}.zip`;
+        }
+
+        /*
+         * Desktop app: the whole tile job runs in the app's native backend, so it keeps going while the
+         * window is minimised. The page describes every tile (source URLs and output path) and shows progress.
+         */
+        async function confirmSyncNative() {
+            syncAborted = false;
+            const target = document.getElementById('targetWidget').value;
+            const provider = document.getElementById('provider').value, mapType = document.getElementById('mapTypeChoice').value, bounds = drawnItems.getLayers()[0].getBounds(), minZ = parseInt(document.getElementById('minZoom').value), maxZ = parseInt(document.getElementById('maxZoom').value);
+            const profile = getOutputProfile(target), exportCfg = (target === 'export') ? getExportConfig(provider, mapType) : null;
+            /* The custom tile export is always delivered as a ZIP, even while an SD card is linked. */
+            const outHandle = (target === 'export') ? null : sdHandle;
+            let output;
+            if (outHandle && outHandle.nativePath) {
+                output = { kind: 'folder', root: outHandle.nativePath };
+            } else {
+                const file = await hrmgApp.pickSavePath(getSyncZipName(target, profile));
+                if (!file) return;
+                output = { kind: 'zip', file };
+            }
+            const isZipMode = output.kind === 'zip';
+            document.getElementById('modalHeader').innerText = isZipMode ? "Saving ZIP" : "Syncing Project";
+            document.getElementById('modalActions').style.display = 'none';
+            document.getElementById('overwriteSection').style.display = 'none';
+            document.getElementById('progressSection').style.display = 'block';
+
+            const tiles = collectSyncTiles(bounds, minZ, maxZ).map(({ z, x, y }) => ({
+                urls: getTileSourceUrls(provider, mapType, z, x, y),
+                path: getTilePath(target, isZipMode, provider, mapType, z, x, y, exportCfg).join('/')
+            }));
+            const startTime = Date.now();
+            updateSyncProgress(0, tiles.length, startTime, 0);
+            let result;
+            try {
+                result = await hrmgApp.runTileJob({
+                    output,
+                    size: profile.size,
+                    format: profile.ext,
+                    quality: profile.quality || 0.8,
+                    overwrite: document.getElementById('overwriteToggle').checked,
+                    tiles
+                }, ev => {
+                    if (ev.type === 'progress') updateSyncProgress(ev.processed, ev.total, startTime, ev.failed);
+                    else if (ev.type === 'log') appendLog(ev.text, ev.warn);
+                    else if (ev.type === 'retry') document.getElementById('downloadStatus').innerText = `Retrying: ${ev.done} / ${ev.total} (recovered: ${ev.recovered})`;
+                });
+            } catch (e) {
+                appendLog(`Sync failed: ${e}`, true);
+                alert(`Sync failed: ${e}`);
+                closeSync();
+                return;
+            }
+            if (result.cancelled || syncAborted) return;
+            if (result.error) {
+                appendLog(result.error, true);
+                document.getElementById('status').innerText = result.error;
+                alert(result.error);
+                closeSync();
+                return;
+            }
+            if (result.failed === 0) clearLog();
+            if (result.skipped > 0) appendLog(`Skipped ${result.skipped} existing tile(s). Enable Force Overwrite to update them.`);
+            await showSyncResult(target, provider, mapType, result.failed);
+        }
+
         /*
          * Execute the full export pipeline:
          * gather tiles, fetch/resize in parallel, write to SD card or ZIP, and keep UI progress updated.
          */
         async function confirmSync() {
+            if (hrmgApp && await hrmgApp.supported) return confirmSyncNative();
             syncAborted = false;
             const target = document.getElementById('targetWidget').value;
             /* The custom tile export is always delivered as a ZIP, even while an SD card is linked. */
@@ -1679,15 +1896,7 @@
             const profile = getOutputProfile(target), exportCfg = (target === 'export') ? getExportConfig(provider, mapType) : null;
             /* Cached tile blobs are only reusable for the same output size and format. */
             const cachePrefix = `${profile.size}/${profile.ext}/`;
-            const tiles = [];
-            for (let z = minZ; z <= maxZ; z++) {
-                const xMin = lon2tile(bounds.getWest(), z), xMax = lon2tile(bounds.getEast(), z), yMin = lat2tile(bounds.getNorth(), z), yMax = lat2tile(bounds.getSouth(), z);
-                for (let x = xMin; x <= xMax; x++) {
-                    for (let y = yMin; y <= yMax; y++) {
-                        tiles.push({ z, x, y });
-                    }
-                }
-            }
+            const tiles = collectSyncTiles(bounds, minZ, maxZ);
 
             let total = tiles.length, processed = 0, failedCount = 0, errorCount = 0;
             const startTime = Date.now();
@@ -1819,69 +2028,63 @@
 
             pushProgress(true);
             if (zip && !syncAborted) {
-                const projName = document.getElementById('projectName').value.trim();
-                let targetLabel = 'b14ckyy';
-                if (target === 'yaapu') {
-                    const yst = document.getElementById('yaapuSubTarget');
-                    targetLabel = (yst && yst.value === 'HorusMappingWidget') ? 'Yaapu-EdgeTX' : 'Yaapu-ETHOS';
-                } else if (target === 'export') {
-                    targetLabel = `Custom-${profile.size}`;
-                }
-                const safeName = projName.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'MapTiles';
-                saveAs(await zip.generateAsync({type: "blob"}), `${safeName}_${targetLabel}.zip`);
+                saveAs(await zip.generateAsync({type: "blob"}), getSyncZipName(target, profile));
             }
             /* Full-resolution tiles are large: drop them from the in-memory cache once the ZIP is complete. */
             if (target === 'export' && failedCount === 0) {
                 Object.keys(zipCache).forEach(k => { if (k.startsWith(cachePrefix)) delete zipCache[k]; });
             }
-            if (!syncAborted) {
-                if (failedCount > 0) {
-                    document.getElementById('downloadStatus').innerText = `Completed with ${failedCount} failed tile(s).`;
-                    await sleep(700);
-                    alert(`Sync finished with ${failedCount} failed tile(s). Please retry with Force Overwrite.`);
-                    closeSync();
-                } else {
-                    // Show confirmation modal with same layout as pre-sync
-                    // Gather info for summary
-                    const projectName = document.getElementById('projectName').value;
-                    const targetPath = getExamplePath(target, provider, mapType);
-                    // Try to get area and zooms from last sync
-                    let areaValue = '';
-                    let minZ = '', maxZ = '', totalTiles = '';
-                    try {
-                        const layer = drawnItems.getLayers()[0];
-                        if (layer) {
-                            areaValue = formatArea(L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]));
-                            minZ = document.getElementById('minZoom').value;
-                            maxZ = document.getElementById('maxZoom').value;
-                            totalTiles = calculateTiles(layer.getBounds(), parseInt(minZ), parseInt(maxZ)).toLocaleString();
-                        }
-                    } catch (e) {}
-                    document.getElementById('modalHeader').innerText = (target === 'export') ? 'Export Complete!' : 'Sync Complete!';
-                    const confirmTargetDisplayName = getTargetDisplayName(target);
-                    const completeMsg = (target === 'export') ? 'Export complete! The ZIP download has started.' : 'Sync complete! All tiles exported successfully.';
-                    document.getElementById('syncInfo').innerHTML = `
-                        <div class="sync-info-row"><span>Target Widget:</span><span>${confirmTargetDisplayName}</span></div>
-                        <div class="sync-info-row"><span>Total Tiles:</span><span>${totalTiles}</span></div>
-                        <div class="sync-info-row"><span>Project Name:</span><span>${projectName}</span></div>
-                        <div class="sync-info-row"><span>Zoom Range:</span><span>${minZ} - ${maxZ}</span></div>
-                        <div class="sync-info-row"><span>Area:</span><span>${areaValue}</span></div>
-                        <div class="sync-info-row"><span>Example Path:</span><span style="font-size:10px;">${targetPath}</span></div>
-                        <div style='margin:18px 0 0 0; text-align:center; color:#87b025; font-size:16px; font-weight:bold;'>${completeMsg}</div>
-                    `;
-                    document.getElementById('progressSection').style.display = 'none';
-                    document.getElementById('overwriteSection').style.display = 'none';
-                    document.getElementById('modalActions').style.display = 'flex';
-                    document.getElementById('mainConfirmBtn').style.display = 'none';
-                    // Reuse the Cancel button as Close
-                    const modalActions = document.getElementById('modalActions');
-                    const cancelBtn = modalActions.querySelector('.btn-cancel');
-                    if (cancelBtn) {
-                        cancelBtn.innerText = 'Close';
-                        cancelBtn.className = 'btn-confirm';
-                        cancelBtn.onclick = closeSync;
-                        cancelBtn.style.display = 'block';
+            if (!syncAborted) await showSyncResult(target, provider, mapType, failedCount);
+        }
+
+        /* Show the end of a sync: an alert for failed tiles, otherwise the summary in the sync dialog. */
+        async function showSyncResult(target, provider, mapType, failedCount) {
+            if (failedCount > 0) {
+                document.getElementById('downloadStatus').innerText = `Completed with ${failedCount} failed tile(s).`;
+                await sleep(700);
+                alert(`Sync finished with ${failedCount} failed tile(s). Please retry with Force Overwrite.`);
+                closeSync();
+            } else {
+                // Show confirmation modal with same layout as pre-sync
+                // Gather info for summary
+                const projectName = document.getElementById('projectName').value;
+                const targetPath = getExamplePath(target, provider, mapType);
+                // Try to get area and zooms from last sync
+                let areaValue = '';
+                let minZ = '', maxZ = '', totalTiles = '';
+                try {
+                    const layer = drawnItems.getLayers()[0];
+                    if (layer) {
+                        areaValue = formatArea(L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]));
+                        minZ = document.getElementById('minZoom').value;
+                        maxZ = document.getElementById('maxZoom').value;
+                        totalTiles = calculateTiles(layer.getBounds(), parseInt(minZ), parseInt(maxZ)).toLocaleString();
                     }
+                } catch (e) {}
+                document.getElementById('modalHeader').innerText = (target === 'export') ? 'Export Complete!' : 'Sync Complete!';
+                const confirmTargetDisplayName = getTargetDisplayName(target);
+                const completeMsg = (target === 'export') ? 'Export complete! The ZIP download has started.' : 'Sync complete! All tiles exported successfully.';
+                document.getElementById('syncInfo').innerHTML = `
+                    <div class="sync-info-row"><span>Target Widget:</span><span>${confirmTargetDisplayName}</span></div>
+                    <div class="sync-info-row"><span>Total Tiles:</span><span>${totalTiles}</span></div>
+                    <div class="sync-info-row"><span>Project Name:</span><span>${projectName}</span></div>
+                    <div class="sync-info-row"><span>Zoom Range:</span><span>${minZ} - ${maxZ}</span></div>
+                    <div class="sync-info-row"><span>Area:</span><span>${areaValue}</span></div>
+                    <div class="sync-info-row"><span>Example Path:</span><span style="font-size:10px;">${targetPath}</span></div>
+                    <div style='margin:18px 0 0 0; text-align:center; color:#87b025; font-size:16px; font-weight:bold;'>${completeMsg}</div>
+                `;
+                document.getElementById('progressSection').style.display = 'none';
+                document.getElementById('overwriteSection').style.display = 'none';
+                document.getElementById('modalActions').style.display = 'flex';
+                document.getElementById('mainConfirmBtn').style.display = 'none';
+                // Reuse the Cancel button as Close
+                const modalActions = document.getElementById('modalActions');
+                const cancelBtn = modalActions.querySelector('.btn-cancel');
+                if (cancelBtn) {
+                    cancelBtn.innerText = 'Close';
+                    cancelBtn.className = 'btn-confirm';
+                    cancelBtn.onclick = closeSync;
+                    cancelBtn.style.display = 'block';
                 }
             }
         }
